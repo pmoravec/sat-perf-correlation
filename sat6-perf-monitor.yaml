@@ -1,0 +1,191 @@
+- name: Enable Satellite PCP
+  gather_facts: no
+  hosts: localhost
+  connection: local
+
+  pre_tasks:
+
+    - name: get the package facts
+      package_facts:
+        manager: "auto"
+    
+    - name: get Satellite version
+      set_fact: 
+        satversion: "{{ansible_facts.packages.satellite[0].version}}"
+
+  tasks:
+
+    - name: Install PCP packages on Satellite 6.15
+      command: >
+        dnf install --disableplugin=foreman-protector -y \
+        python3-policycoreutils \
+        pcp \
+        pcp-pmda-statsd \
+        pcp-system-tools \
+        pcp-pmda-openmetrics \
+        foreman-pcp
+      when: "'6.15' in satversion"
+
+    - name: Create hotproc.conf link on Satellite 6.15
+      file:
+        src: /etc/pcp/proc/foreman-hotproc.conf
+        dest: /var/lib/pcp/pmdas/proc/hotproc.conf
+        state: link
+      when: "'6.15' in satversion"
+
+    - name: Install PCP packages
+      command: >
+        dnf install --disableplugin=foreman-protector -y \
+        python3-policycoreutils \
+        pcp \
+        pcp-pmda-statsd \
+        pcp-system-tools \
+        pcp-pmda-openmetrics
+      when: "'6.15' not in satversion"
+
+    - name: Set pcp_pmcd_t permissive domain
+      selinux_permissive: # we should add UDP port 8125 to statsd_port_t or something similar, but I failed to identify what exactly..
+        name: pcp_pmcd_t
+        permissive: true
+
+    - name: Enable PCP services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - pmlogger
+        - pmcd
+
+    - name: Install statsd and hotproc
+      command: ./Install
+      args:
+        chdir: "{{item}}"
+      loop:
+        - /var/lib/pcp/pmdas/proc
+        - /var/lib/pcp/pmdas/statsd
+        - /var/lib/pcp/pmdas/openmetrics
+      
+    - name: Create foreman_tasks.sh for PCP openmetrics
+      copy:
+        dest: "/var/lib/pcp/pmdas/openmetrics/config.d/foreman_tasks.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+
+          database=$(grep database: /etc/foreman/database.yml | awk '{ print $2 }')
+          username=$(grep username: /etc/foreman/database.yml | awk '{ print $2 }')
+          password=$(grep password: /etc/foreman/database.yml | awk '{ print $2 }' | tr -d '"' | tr -d "'")
+          dbhost=$(grep host: /etc/foreman/database.yml | awk '{ print $2 }')
+          dbhost=${dbhost:-localhost}
+          minutes=1
+
+          PGPASSWORD=$password psql --no-password -h $dbhost -p 5432 -U foreman -d foreman -c "COPY (SELECT label, COUNT(*), COALESCE(SUM(EXTRACT(EPOCH FROM ended_at-started_at)), 0), COALESCE(MAX(EXTRACT(EPOCH FROM ended_at-started_at)), 0) FROM foreman_tasks_tasks WHERE started_at > timezone('utc', now()) - interval '${minutes} minutes' OR ended_at > timezone('utc', now()) - interval '${minutes} minutes' OR state IN ('planning', 'planned', 'running') GROUP BY label) TO STDOUT WITH DELIMITER ';'" | while IFS=';' read LABEL COUNT SUM MAX; do
+
+              LABEL=$(echo $LABEL | tr '[:upper:]' '[:lower:]' | sed "s/::/_/g")
+              echo "tasks_count.${LABEL} $COUNT"
+              echo "tasks_duration_sum.${LABEL} $SUM"
+              echo "tasks_duration_max.${LABEL} $MAX"
+          done
+
+    - name: Create dynflow_steps.sh for PCP openmetrics
+      copy:
+        dest: "/var/lib/pcp/pmdas/openmetrics/config.d/dynflow_steps.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          
+          database=$(grep database: /etc/foreman/database.yml | awk '{ print $2 }')
+          username=$(grep username: /etc/foreman/database.yml | awk '{ print $2 }')
+          password=$(grep password: /etc/foreman/database.yml | awk '{ print $2 }' | tr -d '"' | tr -d "'")
+          dbhost=$(grep host: /etc/foreman/database.yml | awk '{ print $2 }')
+          dbhost=${dbhost:-localhost}
+          minutes=1
+
+          PGPASSWORD=$password psql --no-password -h $dbhost -p 5432 -U foreman -d foreman -c "COPY (SELECT action_class, COUNT(*), COALESCE(MAX(real_time), 0), COALESCE(SUM(real_time), 0), COALESCE(MAX(execution_time), 0), COALESCE(SUM(execution_time), 0) FROM dynflow_steps WHERE started_at > timezone('utc', now()) - interval '${minutes} minutes' OR ended_at > timezone('utc', now()) - interval '${minutes} minutes' OR (started_at != NULL AND ended_at = NULL) GROUP BY action_class) TO STDOUT WITH DELIMITER ';'" | while IFS=';' read LABEL COUNT REAL_MAX REAL_SUM EXEC_MAX EXEC_SUM; do
+              LABEL=$(echo ${LABEL#*::} | tr '[:upper:]' '[:lower:]' | sed "s/::/_/g")
+              echo "dynflow_count.${LABEL} $COUNT"
+              echo "dynflow_duration_real_max.${LABEL} $REAL_MAX"
+              echo "dynflow_duration_real_sum.${LABEL} $REAL_SUM"
+              echo "dynflow_duration_exec_max.${LABEL} $EXEC_MAX"
+              echo "dynflow_duration_exec_sum.${LABEL} $EXEC_SUM"
+          done
+
+    - name: Create pulp_tasks.sh for PCP openmetrics
+      copy:
+        dest: "/var/lib/pcp/pmdas/openmetrics/config.d/pulp_tasks.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+
+          password=$(grep -m1 PASSWORD /etc/pulp/settings.py | awk '{ print $2 }' | tr -d ',' | tr -d '"' | tr -d "'")
+          minutes=1
+
+          PGPASSWORD=$password psql --no-password -h localhost -p 5432 -U pulp -d pulpcore -c "COPY (SELECT name, COUNT(*), COALESCE(SUM(EXTRACT(EPOCH FROM finished_at-started_at)), 0), COALESCE(MAX(EXTRACT(EPOCH FROM finished_at-started_at)), 0) FROM core_task WHERE started_at > now() - interval '90 minutes' OR finished_at > now() - interval '90 minutes' OR (started_at != NULL AND finished_at = NULL) GROUP BY name) TO STDOUT WITH DELIMITER ';'" | while IFS=';' read NAME COUNT SUM MAX; do
+              NAME=$(echo $NAME | tr '[:upper:]' '[:lower:]' | sed "s/\./_/g")
+              echo "pulp_tasks_count.${NAME} $COUNT"
+              echo "pulp_tasks_duration_max.${NAME} $MAX"
+              echo "pulp_tasks_duration_sum.${NAME} $SUM"
+          done
+
+    - name: Configure pmlogger to colled stats
+      blockinfile:
+        path: /var/lib/pcp/config/pmlogger/config.default
+        insertbefore: '\[access\]'
+        block: |
+          log advisory on default {
+                  statsd
+                  openmetrics.foreman_tasks
+                  openmetrics.dynflow_steps
+                  openmetrics.pulp_tasks
+          }
+
+    - name: Restart PCP services
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - pmlogger
+        - pmcd
+      retries: 3
+      delay: 3
+
+    - name: Enable statsd telemetry in Satellite
+      command: satellite-installer --foreman-telemetry-prometheus-enabled false --foreman-telemetry-statsd-enabled true
+
+    - name: Update 5_telemetry.rb source code to make allowed_labels configurable
+      blockinfile:
+        path: /usr/share/foreman/config/initializers/5_telemetry.rb
+        insertbefore: 'telemetry.add_allowed_tags!\(allowed_labels\)'
+        block: 'allowed_labels.merge!(SETTINGS[:telemetry][:allowed_labels]) if SETTINGS[:telemetry] && SETTINGS[:telemetry][:allowed_labels]'
+      notify: "restart foreman"
+
+    - name: Add needed allowed_labels
+      blockinfile:
+        path: /etc/foreman/settings.yaml
+        insertbefore: "  # Rails logs end up in logger named 'telemetry' when enabled"
+        block: |
+          {% filter indent(width=2, first=true) %}
+          :allowed_labels:
+            :controller: 
+              - 'api/v2/.*'
+              - 'katello/api/.*'
+              - 'foreman_tasks/api/.*'
+              - 'config_reports_controller'
+              - 'dashboard_controller'
+              - 'fact_values_controller'
+              - 'hostgroups_controller'
+              - 'hosts_controller'
+              - 'notification_recipients_controller'
+            :class:
+              - '.*'
+          {% endfilter %}
+      notify: "restart foreman"
+
+  handlers:
+    - name: restart foreman
+      service:
+        name: foreman
+        state: restarted
+      listen: "restart foreman"
+
