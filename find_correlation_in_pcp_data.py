@@ -117,13 +117,16 @@ def find_correl_in_df(df_load, my_df, correl_type, load_type):
     if load_type != 'memory':
         print(f"{INDENT}correlation vs. CPU:")
         metric_corr_cpu = (
-            my_df.corrwith(df_load["CPU"], numeric_only=True)
-            .fillna(value=0).sort_values(ascending=False)[:args.items_limit])
+            my_df.corrwith(df_load["CPU"],
+                           numeric_only=True)
+            .fillna(value=0).sort_values(ascending=False)[:args.items_limit]
+            )
         print_df_indended(metric_corr_cpu)
     if load_type != 'CPU':
         metric_corr_mem = (
             my_df.corrwith(df_load["memory"], numeric_only=True)
-            .fillna(value=0).sort_values(ascending=False)[:args.items_limit])
+            .fillna(value=0).sort_values(ascending=False)[:args.items_limit]
+            )
         print(f"{INDENT}correlation vs. memory:")
         print_df_indended(metric_corr_mem)
     print()
@@ -179,9 +182,11 @@ if args.load_type != "memory" and "kernel.all.load-1 minute" not in df.columns:
 
 # drop columns with /median, /min, /percentile or /std_deviation
 # these are not important for finding triggers or symptoms
-df.drop(list(df.filter(regex=DROP_COLUMN_SUFFIXES_RE)),
-        axis=1,
-        inplace=True)
+df.drop(
+    list(df.filter(regex=DROP_COLUMN_SUFFIXES_RE)),
+    axis=1,
+    inplace=True
+    )
 # drop columns with zeroes only - they are irelevant for us
 # and keeping them raises some CPython warning on execution
 df = df.loc[:, (df != 0).any(axis=0)]
@@ -190,12 +195,14 @@ df = df.loc[:, (df != 0).any(axis=0)]
 df_triggers = df.filter(regex=COLUMNS_FOR_TRIGGERS_PREFIXES_RE)
 df_symptoms = (
     df.drop(columns=list(df.filter(regex=COLUMNS_FOR_TRIGGERS_PREFIXES_RE)))
-    .drop(columns=list(df.filter(regex=DROP_COLUMNS_FOR_CORREL_RE))))
+    .drop(columns=list(df.filter(regex=DROP_COLUMNS_FOR_CORREL_RE)))
+    )
 df_load = (
-    df.filter(items=["kernel.all.load-1 minute", "mem.util.committed_AS"])
-    .rename(
-        columns={"kernel.all.load-1 minute": "CPU",
-                 "mem.util.committed_AS": "memory"}))
+    df.filter(items=["kernel.all.load-1 minute",
+              "mem.util.committed_AS"])
+    .rename(columns={"kernel.all.load-1 minute": "CPU",
+            "mem.util.committed_AS": "memory"})
+    )
 
 # df_symptoms:
 # aggregate "proc.hog.cpu *" by process name, and "proc.hog.mem *" the same
