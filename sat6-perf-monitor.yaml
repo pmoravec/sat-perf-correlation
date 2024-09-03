@@ -1,55 +1,54 @@
 - name: Enable Satellite PCP
-  gather_facts: no
+  gather_facts: false
   hosts: localhost
   connection: local
-
   pre_tasks:
+    - name: Get package facts
+      ansible.builtin.package_facts:
+        manager: auto
 
-    - name: get the package facts
-      package_facts:
-        manager: "auto"
-    
-    - name: get Satellite version
-      set_fact: 
-        satversion: "{{ansible_facts.packages.satellite[0].version}}"
+    - name: Identify Satellite RPM version
+      ansible.builtin.set_fact:
+        satellite_rpm_version: "{{ ansible_facts['packages']['satellite'][0]['version'] }}"
 
+    - name: Set satellite_version fact
+      ansible.builtin.set_fact:
+        satellite_version: "{{ satellite_rpm_version.split('.')[:2] | join('.') }}"
   tasks:
+    - name: Install common PCP packages on Satellite
+      ansible.builtin.dnf:
+        name:
+          - python3-policycoreutils
+          - pcp
+          - pcp-pmda-statsd
+          - pcp-system-tools
+          - pcp-pmda-openmetrics
+        state: present
+        disable_plugin: foreman-protector
 
-    - name: Install PCP packages on Satellite 6.15
-      command: >
-        dnf install --disableplugin=foreman-protector -y \
-        python3-policycoreutils \
-        pcp \
-        pcp-pmda-statsd \
-        pcp-system-tools \
-        pcp-pmda-openmetrics \
-        foreman-pcp
-      when: "'6.15' in satversion"
+    - name: Install additional pcp package on Satellite 6.15 and later versions
+      ansible.builtin.dnf:
+        name: foreman-pcp
+        state: present
+        disable_plugin: foreman-protector
+      when: satellite_version is version('6.15', '>=')
 
-    - name: Create hotproc.conf link on Satellite 6.15
-      file:
+    - name: Create hotproc.conf link on Satellite 6.15 and later versions
+      ansible.builtin.file:
         src: /etc/pcp/proc/foreman-hotproc.conf
         dest: /var/lib/pcp/pmdas/proc/hotproc.conf
         state: link
-      when: "'6.15' in satversion"
+      when: satellite_version is version('6.15', '>=')
 
-    - name: Install PCP packages
-      command: >
-        dnf install --disableplugin=foreman-protector -y \
-        python3-policycoreutils \
-        pcp \
-        pcp-pmda-statsd \
-        pcp-system-tools \
-        pcp-pmda-openmetrics
-      when: "'6.15' not in satversion"
-
-    - name: Set pcp_pmcd_t permissive domain
-      selinux_permissive: # we should add UDP port 8125 to statsd_port_t or something similar, but I failed to identify what exactly..
-        name: pcp_pmcd_t
-        permissive: true
+    - name: Allow statsd_port_t to listen on tcp port 8125
+      community.general.seport:
+        ports: 8125
+        proto: tcp
+        setype: statsd_port_t
+        state: present
 
     - name: Enable PCP services
-      service:
+      ansible.builtin.systemd_service:
         name: "{{ item }}"
         state: started
         enabled: true
@@ -58,16 +57,16 @@
         - pmcd
 
     - name: Install statsd and hotproc
-      command: ./Install
+      ansible.builtin.command: bash Install
       args:
-        chdir: "{{item}}"
+        chdir: "{{ item }}"
       loop:
         - /var/lib/pcp/pmdas/proc
         - /var/lib/pcp/pmdas/statsd
         - /var/lib/pcp/pmdas/openmetrics
-      
+
     - name: Create foreman_tasks.sh for PCP openmetrics
-      copy:
+      ansible.builtin.copy:
         dest: "/var/lib/pcp/pmdas/openmetrics/config.d/foreman_tasks.sh"
         mode: "0755"
         content: |
@@ -89,12 +88,12 @@
           done
 
     - name: Create dynflow_steps.sh for PCP openmetrics
-      copy:
+      ansible.builtin.copy:
         dest: "/var/lib/pcp/pmdas/openmetrics/config.d/dynflow_steps.sh"
         mode: "0755"
         content: |
           #!/bin/bash
-          
+
           database=$(grep database: /etc/foreman/database.yml | awk '{ print $2 }')
           username=$(grep username: /etc/foreman/database.yml | awk '{ print $2 }')
           password=$(grep password: /etc/foreman/database.yml | awk '{ print $2 }' | tr -d '"' | tr -d "'")
@@ -112,7 +111,7 @@
           done
 
     - name: Create pulp_tasks.sh for PCP openmetrics
-      copy:
+      ansible.builtin.copy:
         dest: "/var/lib/pcp/pmdas/openmetrics/config.d/pulp_tasks.sh"
         mode: "0755"
         content: |
@@ -129,7 +128,7 @@
           done
 
     - name: Configure pmlogger to colled stats
-      blockinfile:
+      ansible.builtin.blockinfile:
         path: /var/lib/pcp/config/pmlogger/config.default
         insertbefore: '\[access\]'
         block: |
@@ -141,7 +140,7 @@
           }
 
     - name: Restart PCP services
-      service:
+      ansible.builtin.systemd_service:
         name: "{{ item }}"
         state: restarted
       loop:
@@ -151,23 +150,23 @@
       delay: 3
 
     - name: Enable statsd telemetry in Satellite
-      command: satellite-installer --foreman-telemetry-prometheus-enabled false --foreman-telemetry-statsd-enabled true
+      ansible.builtin.command: satellite-installer --foreman-telemetry-prometheus-enabled false --foreman-telemetry-statsd-enabled true
 
     - name: Update 5_telemetry.rb source code to make allowed_labels configurable
-      blockinfile:
+      ansible.builtin.blockinfile:
         path: /usr/share/foreman/config/initializers/5_telemetry.rb
         insertbefore: 'telemetry.add_allowed_tags!\(allowed_labels\)'
         block: 'allowed_labels.merge!(SETTINGS[:telemetry][:allowed_labels]) if SETTINGS[:telemetry] && SETTINGS[:telemetry][:allowed_labels]'
-      notify: "restart foreman"
+      notify: "Restart foreman"
 
     - name: Add needed allowed_labels
-      blockinfile:
+      ansible.builtin.blockinfile:
         path: /etc/foreman/settings.yaml
         insertbefore: "  # Rails logs end up in logger named 'telemetry' when enabled"
         block: |
           {% filter indent(width=2, first=true) %}
           :allowed_labels:
-            :controller: 
+            :controller:
               - 'api/v2/.*'
               - 'katello/api/.*'
               - 'foreman_tasks/api/.*'
@@ -180,12 +179,10 @@
             :class:
               - '.*'
           {% endfilter %}
-      notify: "restart foreman"
+      notify: "Restart foreman"
 
   handlers:
-    - name: restart foreman
-      service:
+    - name: Restart foreman
+      ansible.builtin.systemd_service:
         name: foreman
         state: restarted
-      listen: "restart foreman"
-
