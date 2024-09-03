@@ -68,7 +68,7 @@ pmrep -p -t 60 -J10 -o csv -a $pmfile kernel.all.load mem.util.committed_AS $sta
 - run attached Python script on any system (not necessarily on the Satellite) that has `python3-pandas` package installed:
 
 ```
-$ ./find_correlation_in_pcp_data.py --input-csv pmrep.statsd.csv --show-symptoms true
+$ ./find_correlation_in_pcp_data.py --input-csv pmrep.statsd.csv --show-symptoms
 Correlations with TRIGGERS
     correlation vs. CPU:
         statsd.fm_rails_http_requests.api_v2_hosts_controller.index.200-/                               0.725793
