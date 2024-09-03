@@ -218,13 +218,12 @@ df_symptoms = df_symptoms.join(proc_df)
 # TODO(DO THE SAME WITH proc.hog.mem.* stats?)
 if args.load_type != "CPU":  # modify the column only when necessary
     for i in range(df_load["memory"].size-1, -1, -1):
-        if (i == 0 or df_load["memory"][i-1] == 0
-                or df_load["memory"][i-1] > df_load["memory"][i]):
+        oldest = df_load["memory"][i-1]
+        newest = df_load["memory"][i]
+        if (i == 0 or oldest == 0 or oldest > newest):
             df_load.at[i, "memory"] = 0
         else:
-            df_load.at[i, "memory"] = (
-                df_load["memory"][i]-df_load["memory"][i-1]
-                )
+            df_load.at[i, "memory"] = newest-oldest
 
 find_correl_in_df(df_load, df_triggers, "TRIGGERS", args.load_type)
 if args.show_symptoms:
